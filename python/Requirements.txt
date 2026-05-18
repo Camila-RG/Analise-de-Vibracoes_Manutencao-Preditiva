@@ -1,0 +1,6 @@
+pyqtgraph
+PyQt5
+numpy
+scipy
+PyWavelets
+reportlab

@@ -1,102 +1,161 @@
+/*
+ * main.cpp — Firmware ESP32 | Análise de Vibrações
+ * FAINOR | Processamento Digital de Sinais | 2026
+ *
+ * Captura o eixo Z do MPU6050 a 2 kHz e transmite cada amostra
+ * via UDP para o PC. O motor DC é acionado pelo driver BTS7960
+ * com controle PWM via LEDC. Velocidade e sentido podem ser
+ * ajustados em tempo real pelo Monitor Serial.
+ *
+ * Dependências (lib/):
+ *   - ElectronicCats/mpu6050
+ *   - WiFi.h / WiFiUdp.h (já incluso no core ESP32)
+ *
+ * Conexões BTS7960:
+ *   RPWM → GPIO 27   (sentido horário)
+ *   LPWM → GPIO 32   (sentido anti-horário)
+ *   R_EN, L_EN → 3.3 V (habilitação permanente)
+ *   VCC motor → fonte externa (12 V recomendado)
+ *   GND comum com ESP32
+ *
+ * Conexões MPU6050 (I²C):
+ *   SDA → GPIO 21
+ *   SCL → GPIO 22
+ *   VCC → 3.3 V  |  GND → GND
+ */
+
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <Wire.h>
 #include <MPU6050.h>
 
-// ─── Wi-Fi / UDP ───────────────────────────────────────────────
-const char* ssid     = "Redmi Note 14";
-const char* password = "camilinha1210";
-const char* pc_ip    = "10.167.196.179";
-const int   udp_port = 5005;
+// ── Rede ──────────────────────────────────────────────────────────
+static constexpr char WIFI_SSID[]  = "Redmi Note 14";
+static constexpr char WIFI_PASS[]  = "camilinha1210";
+static constexpr char PC_IP[]      = "10.167.196.136";   // ex.: "192.168.1.100"
+static constexpr uint16_t UDP_PORT = 5005;
 
-// ─── Pinos BTS7960 ─────────────────────────────────────────────
-// R_EN e L_EN podem ser ligados direto no 3.3 V da placa
-// (habilitação permanente). Se quiser controle via software,
-// defina pinos e chame digitalWrite(R_EN, HIGH) no setup().
-#define RPWM  27   // sentido horário
-#define LPWM  32   // sentido anti-horário
+// ── Pinos BTS7960 ─────────────────────────────────────────────────
+static constexpr uint8_t PIN_RPWM = 27;  // horário
+static constexpr uint8_t PIN_LPWM = 32;  // anti-horário
 
-// ─── Parâmetros PWM (LEDC) ─────────────────────────────────────
-#define PWM_FREQ   20000   // 20 kHz — acima da audição humana
-#define PWM_RES    8       // 8 bits → duty de 0 a 255
-#define CH_R       0       // canal LEDC para RPWM
-#define CH_L       1       // canal LEDC para LPWM
+// ── PWM (LEDC) ────────────────────────────────────────────────────
+static constexpr uint32_t PWM_FREQ  = 20000;  // 20 kHz (inaudível)
+static constexpr uint8_t  PWM_RES   = 8;      // 0–255
+static constexpr uint8_t  LEDC_CH_R = 0;
+static constexpr uint8_t  LEDC_CH_L = 1;
 
-// ─── MPU / UDP ─────────────────────────────────────────────────
+// ── Amostragem ────────────────────────────────────────────────────
+static constexpr uint32_t FS_US = 500;  // período de amostragem em µs → 2 kHz
+
+// ── Objetos globais ───────────────────────────────────────────────
 WiFiUDP udp;
 MPU6050 mpu;
 
-// ─── Controle do motor ─────────────────────────────────────────
-// Chame setMotor() a qualquer momento para mudar velocidade/sentido
-// speed: 0–255
-// dir:   1 = horário, -1 = anti-horário, 0 = freio
+// ══════════════════════════════════════════════════════════════════
+//  CONTROLE DO MOTOR
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * @brief Ajusta velocidade e sentido do motor.
+ * @param speed  Duty cycle: 0–255
+ * @param dir    1 = horário | -1 = anti-horário | 0 = freio/parado
+ */
 void setMotor(int speed, int dir) {
-  speed = constrain(speed, 0, 255);
-  if (dir == 1) {
-    ledcWrite(CH_R, speed);
-    ledcWrite(CH_L, 0);
-  } else if (dir == -1) {
-    ledcWrite(CH_R, 0);
-    ledcWrite(CH_L, speed);
-  } else {            // freio (ambos ativos ou ambos 0)
-    ledcWrite(CH_R, 0);
-    ledcWrite(CH_L, 0);
-  }
-}
+    speed = constrain(speed, 0, 255);
 
-// ─── Setup ─────────────────────────────────────────────────────
-void setup() {
-  Serial.begin(115200);
-
-  // LEDC — configura canais PWM
-  ledcSetup(CH_R, PWM_FREQ, PWM_RES);
-  ledcSetup(CH_L, PWM_FREQ, PWM_RES);
-  ledcAttachPin(RPWM, CH_R);
-  ledcAttachPin(LPWM, CH_L);
-  setMotor(0, 0);   // garante motor parado na inicialização
-
-  // I²C + MPU6050
-  Wire.begin(21, 22);
-  mpu.initialize();
-  mpu.setFullScaleAccelRange(0);   // ±2g
-
-  // Wi-Fi
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) delay(500);
-  Serial.println("WiFi OK — IP: " + WiFi.localIP().toString());
-
-  // ── Exemplo: liga o motor a 60 % no sentido horário ──────────
-  // Troque estes valores ou controle via Serial/UDP conforme necessário
-  setMotor(153, 1);   // 153/255 ≈ 60 %
-}
-
-// ─── Loop principal ────────────────────────────────────────────
-// Mantém a taxa de amostragem de 2 kHz e aceita comandos pelo
-// Serial para mudar velocidade/sentido em tempo real.
-void loop() {
-  // ── Leitura do MPU e envio UDP (2 kHz) ─────────────────────
-  int16_t ax, ay, az, gx, gy, gz;
-  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-
-  udp.beginPacket(pc_ip, udp_port);
-  udp.write((uint8_t*)&az, sizeof(int16_t));
-  udp.endPacket();
-
-  // ── Controle via Serial (opcional) ─────────────────────────
-  // Formato: "S,<speed>,<dir>\n"  ex: "S,200,1"  ou  "S,0,0"
-  if (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
-    if (cmd.startsWith("S,")) {
-      int c1 = cmd.indexOf(',', 2);
-      if (c1 > 2) {
-        int spd = cmd.substring(2, c1).toInt();
-        int dir = cmd.substring(c1 + 1).toInt();
-        setMotor(spd, dir);
-        Serial.printf("Motor: speed=%d dir=%d\n", spd, dir);
-      }
+    switch (dir) {
+        case 1:   // horário
+            ledcWrite(LEDC_CH_R, speed);
+            ledcWrite(LEDC_CH_L, 0);
+            break;
+        case -1:  // anti-horário
+            ledcWrite(LEDC_CH_R, 0);
+            ledcWrite(LEDC_CH_L, speed);
+            break;
+        default:  // freio / parado
+            ledcWrite(LEDC_CH_R, 0);
+            ledcWrite(LEDC_CH_L, 0);
+            break;
     }
-  }
+}
 
-  delayMicroseconds(500);   // 2 kHz
+// ══════════════════════════════════════════════════════════════════
+//  SETUP
+// ══════════════════════════════════════════════════════════════════
+
+void setup() {
+    Serial.begin(115200);
+
+    // ── PWM (BTS7960) ─────────────────────────────────────────────
+    ledcSetup(LEDC_CH_R, PWM_FREQ, PWM_RES);
+    ledcSetup(LEDC_CH_L, PWM_FREQ, PWM_RES);
+    ledcAttachPin(PIN_RPWM, LEDC_CH_R);
+    ledcAttachPin(PIN_LPWM, LEDC_CH_L);
+    setMotor(0, 0);  // garante motor parado na inicialização
+    Serial.println("[Motor] Inicializado — parado.");
+
+    // ── MPU6050 ───────────────────────────────────────────────────
+    Wire.begin(21, 22);
+    mpu.initialize();
+    mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);  // ±2 g → 16384 LSB/g
+    Serial.println("[MPU6050] Inicializado — faixa ±2 g.");
+
+    // ── Wi-Fi ─────────────────────────────────────────────────────
+    Serial.printf("[WiFi] Conectando a '%s'…\n", WIFI_SSID);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.printf("\n[WiFi] Conectado! IP local: %s\n",
+                  WiFi.localIP().toString().c_str());
+
+    // ── Inicia UDP ────────────────────────────────────────────────
+    udp.begin(UDP_PORT);
+    Serial.printf("[UDP] Enviando para %s:%u a 2 kHz\n", PC_IP, UDP_PORT);
+
+    // ── Liga o motor (ajuste speed/dir conforme necessário) ───────
+    setMotor(153, 1);  // ~60 % de duty, sentido horário
+    Serial.println("[Motor] Ligado a 60 % (horário).");
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  LOOP PRINCIPAL
+// ══════════════════════════════════════════════════════════════════
+
+/*
+ * Comandos Serial (formato CSV):
+ *   S,<speed>,<dir>   ex.: S,200,1   ou   S,0,0
+ *   speed: 0–255  |  dir: 1 (horário), -1 (anti-horário), 0 (parar)
+ */
+void loop() {
+    // ── Captura MPU6050 e envia UDP ───────────────────────────────
+    int16_t ax, ay, az, gx, gy, gz;
+    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+
+    udp.beginPacket(PC_IP, UDP_PORT);
+    udp.write(reinterpret_cast<const uint8_t*>(&az), sizeof(int16_t));
+    udp.endPacket();
+
+    // ── Comandos via Serial ───────────────────────────────────────
+    if (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+
+        if (cmd.startsWith("S,")) {
+            int sep = cmd.indexOf(',', 2);
+            if (sep > 2) {
+                int spd = cmd.substring(2, sep).toInt();
+                int dir = cmd.substring(sep + 1).toInt();
+                setMotor(spd, dir);
+                Serial.printf("[Motor] speed=%d  dir=%d\n", spd, dir);
+            } else {
+                Serial.println("[Erro] Formato esperado: S,<speed>,<dir>");
+            }
+        }
+    }
+
+    // ── Aguarda para manter 2 kHz ────────────────────────────────
+    delayMicroseconds(FS_US);
 }

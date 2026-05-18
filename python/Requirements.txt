@@ -1,6 +1,7 @@
-pyqtgraph
-PyQt5
+# requirements.txt — Análise de Vibrações | FAINOR 2026
+# Instale com: pip install -r requirements.txt
+
 numpy
 scipy
 PyWavelets
-reportlab
+matplotlib

@@ -1,0 +1,1 @@
+﻿# Analise-de-Vibracoes_Manutencao-Pedritiva

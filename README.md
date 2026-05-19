@@ -51,8 +51,8 @@ Três condições mecânicas foram testadas (60 s cada):
 | Falha leve | 0,0827 | 5,79 | 5,39 |
 | Falha pesada | 0,1266 | 22,65 | 8,23 |
 
-- **Curtose ~10× mais sensível que RMS** na detecção de falhas incipientes (+553% vs +52,7%)
-- **100% de integridade** de transmissão em mais de 1,6 milhão de pacotes UDP
+- **Curtose é mais sensível que RMS** na detecção de falhas incipientes (+553% vs +52,7%)
+- **100% de integridade** de transmissão em pacotes UDP
 - Limiar de alerta: RMS > 0,10 g **ou** curtose > 4,0
 
 ---
@@ -65,36 +65,19 @@ Três condições mecânicas foram testadas (60 s cada):
 
 ---
 
-## Estrutura do Repositório
-
-```
-├── firmware/          # Código ESP32 (PlatformIO)
-│   └── src/main.cpp
-├── host/              # Scripts Python
-│   ├── receiver.py    # Recepção UDP e pipeline de processamento
-│   └── dashboard.py   # Visualização em tempo real
-├── data/              # CSVs das coletas (telemetria_vibracao.csv)
-└── docs/              # Relatório e imagens da bancada
-```
-
----
-
 ## Como Executar
 
 **1. Firmware (ESP32)**
-```bash
-cd firmware
-pio run --target upload
-```
+
 Edite `src/main.cpp` com o SSID/senha da rede e o IP do host antes de compilar.
+Compile o código na ide após baixar as bibliotecas necessárias.
 
 **2. Host (Python)**
 ```bash
-pip install numpy scipy PyWavelets matplotlib
-python host/receiver.py
+cd python
+python recebimentodados.py
 ```
 O dashboard abre automaticamente e exibe os dados em tempo real.
-
 ---
 
 ## Autores

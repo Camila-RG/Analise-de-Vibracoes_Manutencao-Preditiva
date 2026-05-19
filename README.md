@@ -78,6 +78,7 @@ cd python
 python recebimentodados.py
 ```
 O dashboard abre automaticamente e exibe os dados em tempo real.
+
 ---
 
 ## Autores
